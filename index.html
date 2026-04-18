@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SGX Story VisGen | Ultra Core v4</title>
+  <title>SGX Story VisGen | Ultra Core v5 (Audio + Upload Fix)</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -64,27 +64,35 @@
     import { Settings2, Camera, PaintBucket, Grid, Scissors, Layers, Upload, Video, Square, Zap, Scan, MonitorPlay, Palette } from 'lucide-react';
 
     // ==========================================
-    // SHADER ENGINE (SGX.Story Core - V4)
+    // SHADER ENGINE (SGX.Story Core - V5)
     // ==========================================
     const ComicBackground = ({ mediaSource, isCamera, shaderParams }) => {
         const { size } = useThree();
         const materialRef = useRef();
         const [texture, setTexture] = useState(null);
 
+        // FIX DE MEMORIA Y UPLOAD: Manejo estricto de Texturas según el TagName
         useEffect(() => {
             if (!mediaSource) return;
-            if (mediaSource instanceof HTMLVideoElement) {
-                const tex = new THREE.VideoTexture(mediaSource);
-                tex.minFilter = THREE.LinearFilter;
-                tex.magFilter = THREE.LinearFilter;
-                setTexture(tex);
-            } else if (mediaSource instanceof HTMLImageElement) {
-                const tex = new THREE.Texture(mediaSource);
-                tex.needsUpdate = true;
+            
+            let tex;
+            if (mediaSource.tagName.toUpperCase() === 'VIDEO') {
+                tex = new THREE.VideoTexture(mediaSource);
+            } else if (mediaSource.tagName.toUpperCase() === 'IMG') {
+                tex = new THREE.Texture(mediaSource);
+                tex.needsUpdate = true; // Fundamental para imágenes estáticas
+            }
+            
+            if (tex) {
                 tex.minFilter = THREE.LinearFilter;
                 tex.magFilter = THREE.LinearFilter;
                 setTexture(tex);
             }
+
+            // Garbage Collection para evitar freezes al cambiar de upload a cámara
+            return () => {
+                if (tex) tex.dispose();
+            };
         }, [mediaSource]);
 
         const uniforms = useMemo(() => ({
@@ -95,15 +103,15 @@
             uEdgeThreshold: { value: 0.15 },
             uColorSteps: { value: 5.0 },
             uSaturation: { value: 1.5 },
-            uHue: { value: 0.0 }, // Control de Matiz (0 a 6.28 radianes)
+            uHue: { value: 0.0 }, 
             uDotScale: { value: 80.0 },
             uDotIntensity: { value: 0.5 },
             uBrightness: { value: 1.0 },
             uContrast: { value: 1.0 },
             uNoise: { value: 0.0 },
             uAberration: { value: 0.0 },
-            uGlitchTearing: { value: 0.0 }, // Separado de aberración
-            uScanlines: { value: 0.0 } // Nuevo efecto CRT
+            uGlitchTearing: { value: 0.0 },
+            uScanlines: { value: 0.0 }
         }), [isCamera]);
 
         useEffect(() => {
@@ -163,7 +171,6 @@
             float getLuma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
             float rand(vec2 co){ return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453); }
 
-            // Función matemática para rotación de matiz (Hue Shift)
             vec3 applyHue(vec3 color, float hue) {
                 const vec3 k = vec3(0.57735, 0.57735, 0.57735);
                 float cosAngle = cos(hue);
@@ -174,7 +181,6 @@
                 vec2 uv = vUv;
                 if(uMirror > 0.5) { uv.x = 1.0 - uv.x; }
 
-                // 1. GLITCH: DESGARRE HORIZONTAL (TEARING)
                 float glitchOffset = 0.0;
                 if (uGlitchTearing > 0.0) {
                     float gTime = uTime * 15.0;
@@ -183,7 +189,6 @@
                 }
                 vec2 baseUv = uv + vec2(glitchOffset, 0.0);
 
-                // 2. ABERRACIÓN CROMÁTICA
                 vec2 rUv = baseUv + vec2(uAberration * 0.01, 0.0);
                 vec2 gUv = baseUv;
                 vec2 bUv = baseUv - vec2(uAberration * 0.01, 0.0);
@@ -193,19 +198,15 @@
                 color.g = texture2D(tDiffuse, gUv).g;
                 color.b = texture2D(tDiffuse, bUv).b;
                 
-                // 3. COLOR GRADING: Brillo, Contraste, Saturación y Matiz (Hue)
                 color = (color - 0.5) * uContrast + 0.5;
                 color *= uBrightness;
                 
                 float luma = getLuma(color);
                 vec3 lumaVec = vec3(luma);
                 
-                // Aplicar Saturación
                 color = mix(lumaVec, color, uSaturation);
-                // Aplicar Rotación de Matiz
                 color = applyHue(color, uHue);
 
-                // 4. DETECCIÓN DE BORDES (Tinta)
                 vec2 texel = 1.0 / uResolution;
                 float s00 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(-1.0, -1.0)).rgb);
                 float s22 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(1.0, 1.0)).rgb);
@@ -215,10 +216,8 @@
                 float edge = abs(s00 - s22) + abs(s02 - s20);
                 float isEdge = smoothstep(uEdgeThreshold - 0.05, uEdgeThreshold, edge);
 
-                // 5. POSTERIZACIÓN
                 vec3 postColor = floor(color * uColorSteps) / uColorSteps;
 
-                // 6. PATRÓN HALFTONE
                 vec2 aspectUv = baseUv;
                 aspectUv.x *= uResolution.x / uResolution.y; 
                 vec2 gridUv = aspectUv * uDotScale; 
@@ -229,11 +228,9 @@
                 float dotMask = smoothstep(radius, radius + 0.1, dotDist);
                 vec3 dotColor = vec3(0.05, 0.05, 0.1);
 
-                // 7. RUIDO DE PELÍCULA Y SCANLINES CRT
                 float n = (rand(baseUv + uTime) - 0.5) * uNoise;
                 float scanline = sin(uv.y * uResolution.y * 1.5) * 0.04 * uScanlines;
 
-                // ENSAMBLAJE FINAL
                 vec3 finalColor = postColor + n - scanline;
                 finalColor = mix(mix(dotColor, finalColor, dotMask), finalColor, 1.0 - uDotIntensity);
                 finalColor = mix(finalColor, vec3(0.02), isEdge); 
@@ -260,12 +257,16 @@
     };
 
     // ==========================================
-    // SGX MASTER INTERFACE
+    // SGX MASTER INTERFACE (Audio + Video Muxing)
     // ==========================================
     function App() {
         const fileInputRef = useRef(null);
         const hiddenVideoRef = useRef(null);
         const hiddenImageRef = useRef(null);
+        
+        // Refs de Streaming Críticos
+        const activeStreamRef = useRef(null);
+        const audioStreamRef = useRef(null); // Captura el audio del Micrófono puro
         
         const [mediaSource, setMediaSource] = useState(null);
         const [isCamera, setIsCamera] = useState(true);
@@ -280,7 +281,7 @@
             inkThickness: 0.8,
             colorSteps: 5.0,      
             saturation: 1.5,      
-            hue: 0.0, // Radianes de 0 a 6.28
+            hue: 0.0, 
             dotScale: 120.0,      
             dotIntensity: 0.4,
             brightness: 1.0,
@@ -302,10 +303,26 @@
         const applyPreset = (key) => setParams(prev => ({ ...prev, ...presets[key] }));
         const updateParam = (key, value) => setParams(prev => ({ ...prev, [key]: Number(value) }));
 
+        // INICIALIZACIÓN CON MICRÓFONO
         const startCamera = async () => {
+            if (activeStreamRef.current) {
+                activeStreamRef.current.getTracks().forEach(t => t.stop());
+            }
+
             if (navigator.mediaDevices) {
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" } });
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" },
+                        audio: { echoCancellation: true, noiseSuppression: true } 
+                    });
+                    
+                    activeStreamRef.current = stream;
+                    
+                    // Extraer y aislar la pista de audio para la mezcla final
+                    if (stream.getAudioTracks().length > 0) {
+                        audioStreamRef.current = new MediaStream([stream.getAudioTracks()[0]]);
+                    }
+
                     if(hiddenVideoRef.current) {
                         hiddenVideoRef.current.srcObject = stream;
                         hiddenVideoRef.current.onloadedmetadata = () => {
@@ -320,16 +337,27 @@
 
         useEffect(() => { startCamera(); }, []);
 
+        // FIX DE UPLOAD Y LIMPIEZA DE DOM
         const handleFileUpload = (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const url = URL.createObjectURL(file);
             
+            // Apagar la cámara si está encendida para liberar memoria/micrófono
+            if (activeStreamRef.current) {
+                activeStreamRef.current.getTracks().forEach(t => t.stop());
+                activeStreamRef.current = null;
+                audioStreamRef.current = null; 
+            }
+
             if (file.type.startsWith('video/')) {
                 if(hiddenVideoRef.current) {
                     hiddenVideoRef.current.srcObject = null;
                     hiddenVideoRef.current.src = url;
                     hiddenVideoRef.current.loop = true;
+                    // Se mantiene muteado en el DOM para permitir autoplay sin interacción,
+                    // pero el captureStream extraerá el audio original.
+                    hiddenVideoRef.current.muted = true; 
                     hiddenVideoRef.current.onloadedmetadata = () => {
                         hiddenVideoRef.current.play();
                         setMediaSource(hiddenVideoRef.current);
@@ -357,38 +385,66 @@
             link.click();
         };
 
+        // FUSIÓN DE AUDIO Y VIDEO + MP4 FALLBACK
         const toggleRecording = () => {
             const canvas = document.querySelector('canvas');
             if(!canvas) return;
 
             if (!isRecording) {
                 recordedChunks.current = [];
-                const stream = canvas.captureStream(60);
+                const canvasStream = canvas.captureStream(30); // 30 FPS para estabilizar
                 
-                const mimeTypes = [
-                    'video/mp4',
-                    'video/webm;codecs=vp9',
-                    'video/webm;codecs=vp8',
-                    'video/webm'
-                ];
-                
-                let selectedType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || '';
-                let ext = selectedType.includes('mp4') ? 'mp4' : 'webm';
-                setVideoExtension(ext);
+                let combinedStream = canvasStream;
+                let finalAudioStream = null;
 
-                mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: selectedType });
+                // 1. Decidir de dónde sacamos el audio (Micro o Video Subido)
+                if (isCamera && audioStreamRef.current) {
+                    finalAudioStream = audioStreamRef.current;
+                } else if (!isCamera && hiddenVideoRef.current) {
+                    // Intento de capturar audio del video subido aunque esté muteado en el DOM
+                    try {
+                        const vidStream = hiddenVideoRef.current.captureStream ? hiddenVideoRef.current.captureStream() : hiddenVideoRef.current.mozCaptureStream();
+                        if (vidStream && vidStream.getAudioTracks().length > 0) {
+                            finalAudioStream = new MediaStream([vidStream.getAudioTracks()[0]]);
+                        }
+                    } catch(e) { console.warn("No audio track in uploaded video", e); }
+                }
+
+                // 2. Fusionar los Tracks
+                if (finalAudioStream && finalAudioStream.getAudioTracks().length > 0) {
+                    combinedStream = new MediaStream([
+                        ...canvasStream.getVideoTracks(),
+                        ...finalAudioStream.getAudioTracks()
+                    ]);
+                }
+
+                // 3. Lógica de Fallback MP4 (El "Truco Sucio")
+                let mimeType = 'video/mp4'; 
+                let fileExt = 'mp4';
+                
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'video/webm; codecs=vp9,opus'; 
+                    fileExt = 'mp4'; // Forzar extensión a nivel de archivo
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        mimeType = 'video/webm'; 
+                    }
+                }
+                setVideoExtension(fileExt);
+
+                mediaRecorderRef.current = new MediaRecorder(combinedStream, { mimeType: mimeType });
                 
                 mediaRecorderRef.current.ondataavailable = (event) => {
                     if (event.data.size > 0) recordedChunks.current.push(event.data);
                 };
                 
                 mediaRecorderRef.current.onstop = () => {
-                    const blob = new Blob(recordedChunks.current, { type: selectedType || 'video/webm' });
+                    const blob = new Blob(recordedChunks.current, { type: mimeType });
                     const url = URL.createObjectURL(blob);
                     const link = document.createElement('a');
-                    link.download = `SGX_VisGen_${Date.now()}.${ext}`;
+                    link.download = `SGX_VisGen_${Date.now()}.${fileExt}`;
                     link.href = url;
                     link.click();
+                    setTimeout(() => window.URL.revokeObjectURL(url), 100);
                 };
                 
                 mediaRecorderRef.current.start();
@@ -444,7 +500,7 @@
                 </div>
 
                 {/* PANEL DE CONTROL MULTIMODULAR */}
-                <div className="absolute bottom-24 left-6 md:top-24 md:left-6 md:bottom-auto w-[calc(100%-3rem)] md:w-80 z-20 flex flex-col gap-2">
+                <div className="absolute bottom-24 left-6 md:top-24 md:left-6 md:bottom-auto w-[calc(100%-3rem)] md:w-72 z-20 flex flex-col gap-2">
                     <button 
                         onClick={() => setIsMenuOpen(!isMenuOpen)}
                         className="flex items-center justify-between bg-sgxYellow text-black border-2 border-black rounded-xl px-4 py-2 font-black uppercase text-sm tracking-widest shadow-[4px_4px_0px_0px_#B87333] hover:translate-y-1 hover:shadow-[0px_0px_0px_0px_#B87333] transition-all"
@@ -454,7 +510,7 @@
                     </button>
 
                     {isMenuOpen && (
-                        <div className="bg-black/90 backdrop-blur-xl border border-sgxBlue rounded-xl p-3 shadow-[0_0_20px_rgba(50,82,123,0.3)] max-h-[60vh] overflow-y-auto no-scrollbar">
+                        <div className="bg-black/90 backdrop-blur-xl border border-sgxBlue rounded-xl p-3 shadow-[0_0_20px_rgba(50,82,123,0.3)] max-h-[55vh] overflow-y-auto no-scrollbar">
                             
                             <div className="grid grid-cols-4 gap-1 mb-4">
                                 <button onClick={() => applyPreset('comic')} className="bg-sgxYellow text-black font-black text-[9px] uppercase py-1.5 rounded hover:bg-yellow-400">Comic</button>
@@ -463,92 +519,67 @@
                                 <button onClick={() => applyPreset('acid')} className="bg-sgxMagenta text-white font-black text-[9px] uppercase py-1.5 rounded hover:bg-fuchsia-600">Acid</button>
                             </div>
 
-                            <div className="space-y-4">
-                                
-                                {/* MODULO: COLOR & GRADING */}
-                                <div className="bg-gray-900/50 p-2 rounded-lg border border-gray-800">
-                                    <div className="text-white text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-1"><Palette className="w-3 h-3 text-sgxYellow"/> Color & Tinta</div>
-                                    
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Matiz (Hue)</div>
-                                            <input type="range" min="0" max="6.28" step="0.01" value={params.hue} onChange={(e) => updateParam('hue', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Saturación</div>
-                                            <input type="range" min="0" max="4" step="0.1" value={params.saturation} onChange={(e) => updateParam('saturation', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Grosor Tinta</div>
-                                            <input type="range" min="0" max="1" step="0.05" value={params.inkThickness} onChange={(e) => updateParam('inkThickness', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Fases Poster</div>
-                                            <input type="range" min="2" max="20" step="1" value={params.colorSteps} onChange={(e) => updateParam('colorSteps', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Brillo</div>
-                                            <input type="range" min="0.1" max="2.5" step="0.1" value={params.brightness} onChange={(e) => updateParam('brightness', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Contraste</div>
-                                            <input type="range" min="0.1" max="3.0" step="0.1" value={params.contrast} onChange={(e) => updateParam('contrast', e.target.value)} />
-                                        </div>
+                            <div className="space-y-3">
+                                <div>
+                                    <div className="flex justify-between text-red-500 text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><Zap className="w-3 h-3"/> Glitch</span>
+                                        <span>{(params.glitchTearing * 100).toFixed(0)}%</span>
                                     </div>
+                                    <input type="range" min="0" max="3" step="0.05" value={params.glitchTearing} onChange={(e) => updateParam('glitchTearing', e.target.value)} />
                                 </div>
 
-                                {/* MODULO: TRAMA & TEXTURA */}
-                                <div className="bg-gray-900/50 p-2 rounded-lg border border-gray-800">
-                                    <div className="text-white text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-1"><Grid className="w-3 h-3 text-sgxNeon"/> Trama & Grano</div>
-                                    
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div className="col-span-2">
-                                            <div className="flex justify-between text-gray-300 text-[9px] font-bold uppercase mb-1">
-                                                <span>Intensidad Halftone</span>
-                                                <span>{(params.dotIntensity * 100).toFixed(0)}%</span>
-                                            </div>
-                                            <input type="range" min="0" max="1" step="0.05" value={params.dotIntensity} onChange={(e) => updateParam('dotIntensity', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Escala Puntos</div>
-                                            <input type="range" min="20" max="250" step="5" value={params.dotScale} onChange={(e) => updateParam('dotScale', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Ruido (Film)</div>
-                                            <input type="range" min="0" max="0.5" step="0.01" value={params.noise} onChange={(e) => updateParam('noise', e.target.value)} />
-                                        </div>
+                                <div>
+                                    <div className="flex justify-between text-blue-400 text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><Scan className="w-3 h-3"/> Aberración RGB</span>
+                                        <span>{params.aberration.toFixed(1)}</span>
                                     </div>
+                                    <input type="range" min="0" max="5" step="0.1" value={params.aberration} onChange={(e) => updateParam('aberration', e.target.value)} />
                                 </div>
 
-                                {/* MODULO: VFX GLITCH CORE */}
-                                <div className="bg-gray-900/50 p-2 rounded-lg border border-gray-800">
-                                    <div className="text-white text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-1"><Zap className="w-3 h-3 text-red-500"/> VFX Glitch</div>
-                                    
-                                    <div className="grid grid-cols-1 gap-3">
-                                        <div>
-                                            <div className="flex justify-between text-red-400 text-[9px] font-bold uppercase mb-1">
-                                                <span>Desgarre (Tearing)</span>
-                                                <span>{(params.glitchTearing * 100).toFixed(0)}%</span>
-                                            </div>
-                                            <input type="range" min="0" max="3" step="0.05" value={params.glitchTearing} onChange={(e) => updateParam('glitchTearing', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-blue-400 text-[9px] font-bold uppercase mb-1">
-                                                <span>Aberración RGB</span>
-                                                <span>{params.aberration.toFixed(1)}</span>
-                                            </div>
-                                            <input type="range" min="0" max="5" step="0.1" value={params.aberration} onChange={(e) => updateParam('aberration', e.target.value)} />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-green-400 text-[9px] font-bold uppercase mb-1">
-                                                <span className="flex items-center gap-1"><MonitorPlay className="w-3 h-3"/> CRT Scanlines</span>
-                                                <span>{(params.scanlines * 100).toFixed(0)}%</span>
-                                            </div>
-                                            <input type="range" min="0" max="2" step="0.05" value={params.scanlines} onChange={(e) => updateParam('scanlines', e.target.value)} />
-                                        </div>
+                                <hr className="border-gray-800 my-1" />
+
+                                <div>
+                                    <div className="flex justify-between text-gray-300 text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><Scissors className="w-3 h-3"/> Grosor Tinta</span>
+                                        <span>{(params.inkThickness * 100).toFixed(0)}%</span>
                                     </div>
+                                    <input type="range" min="0" max="1" step="0.05" value={params.inkThickness} onChange={(e) => updateParam('inkThickness', e.target.value)} />
                                 </div>
 
+                                <div>
+                                    <div className="flex justify-between text-sgxMagenta text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><Layers className="w-3 h-3"/> Posterización</span>
+                                        <span>{params.colorSteps} Fases</span>
+                                    </div>
+                                    <input type="range" min="2" max="20" step="1" value={params.colorSteps} onChange={(e) => updateParam('colorSteps', e.target.value)} />
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between text-sgxYellow text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><PaintBucket className="w-3 h-3"/> Saturación</span>
+                                        <span>{params.saturation.toFixed(1)}x</span>
+                                    </div>
+                                    <input type="range" min="0" max="4" step="0.1" value={params.saturation} onChange={(e) => updateParam('saturation', e.target.value)} />
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between text-sgxNeon text-[9px] font-bold uppercase mb-1">
+                                        <span className="flex items-center gap-1"><Grid className="w-3 h-3"/> Trama de Puntos</span>
+                                        <span>{(params.dotIntensity * 100).toFixed(0)}%</span>
+                                    </div>
+                                    <input type="range" min="0" max="1" step="0.05" value={params.dotIntensity} onChange={(e) => updateParam('dotIntensity', e.target.value)} />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <div className="text-white text-[9px] font-bold uppercase mb-1">Brillo</div>
+                                        <input type="range" min="0.1" max="2.5" step="0.1" value={params.brightness} onChange={(e) => updateParam('brightness', e.target.value)} />
+                                    </div>
+                                    <div>
+                                        <div className="text-white text-[9px] font-bold uppercase mb-1">Contraste</div>
+                                        <input type="range" min="0.1" max="3.0" step="0.1" value={params.contrast} onChange={(e) => updateParam('contrast', e.target.value)} />
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     )}
