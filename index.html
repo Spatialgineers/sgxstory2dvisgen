@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SGX Story VisGen | Ultra Core v6</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>SGX Story VisGen | Production Core v8</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -25,10 +25,11 @@
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono&display=swap');
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #050505; color: white; user-select: none; }
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #050505; color: white; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     #root { width: 100%; height: 100%; }
     
-    input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
+    /* Sliders blindados */
+    input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; position: relative; z-index: 50; }
     input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #FDCC0D; cursor: pointer; margin-top: -4px; box-shadow: 0 0 6px rgba(253,204,13,0.8); }
     input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #32527B; border-radius: 2px; }
     
@@ -64,38 +65,16 @@
     import { Settings2, Camera, PaintBucket, Grid, Scissors, Layers, Upload, Video, Square, Zap, Scan, MonitorPlay, Palette, Image as ImageIcon } from 'lucide-react';
 
     // ==========================================
-    // SHADER ENGINE (SGX.Story Core - V6)
+    // SHADER ENGINE (Object-Fit Cover + VFX)
     // ==========================================
-    const ComicBackground = ({ mediaSource, isCamera, shaderParams }) => {
+    const ComicBackground = ({ texture, mediaRes, isCamera, shaderParams }) => {
         const { size } = useThree();
         const materialRef = useRef();
-        const [texture, setTexture] = useState(null);
-
-        useEffect(() => {
-            if (!mediaSource) return;
-            
-            let tex;
-            if (mediaSource.tagName.toUpperCase() === 'VIDEO') {
-                tex = new THREE.VideoTexture(mediaSource);
-            } else if (mediaSource.tagName.toUpperCase() === 'IMG') {
-                tex = new THREE.Texture(mediaSource);
-                tex.needsUpdate = true; 
-            }
-            
-            if (tex) {
-                tex.minFilter = THREE.LinearFilter;
-                tex.magFilter = THREE.LinearFilter;
-                setTexture(tex);
-            }
-
-            return () => {
-                if (tex) tex.dispose();
-            };
-        }, [mediaSource]);
 
         const uniforms = useMemo(() => ({
             tDiffuse: { value: null },
             uResolution: { value: new THREE.Vector2(1, 1) },
+            uMediaResolution: { value: new THREE.Vector2(1, 1) }, 
             uMirror: { value: isCamera ? 1.0 : 0.0 },
             uTime: { value: 0.0 },
             uEdgeThreshold: { value: 0.15 },
@@ -115,7 +94,8 @@
         useEffect(() => {
             if (texture) uniforms.tDiffuse.value = texture;
             uniforms.uMirror.value = isCamera ? 1.0 : 0.0;
-        }, [texture, uniforms, isCamera]);
+            if (mediaRes) uniforms.uMediaResolution.value.set(mediaRes.x, mediaRes.y);
+        }, [texture, mediaRes, uniforms, isCamera]);
 
         useFrame(({ clock }) => {
             if (materialRef.current) {
@@ -148,6 +128,7 @@
         const fragmentShader = `
             uniform sampler2D tDiffuse;
             uniform vec2 uResolution;
+            uniform vec2 uMediaResolution;
             uniform float uMirror;
             uniform float uTime;
             
@@ -176,8 +157,25 @@
             }
 
             void main() {
-                vec2 uv = vUv;
+                // MATEMÁTICA DE OBJECT-FIT COVER
+                vec2 screenRatio = vec2(uResolution.x / uResolution.y, 1.0);
+                vec2 mediaRatio = vec2(uMediaResolution.x / uMediaResolution.y, 1.0);
+                if (uResolution.x / uResolution.y < 1.0) {
+                    screenRatio = vec2(1.0, uResolution.y / uResolution.x);
+                    mediaRatio = vec2(1.0, uMediaResolution.y / uMediaResolution.x);
+                }
+                vec2 ratio = vec2(
+                    max(screenRatio.x / mediaRatio.x, 1.0),
+                    max(screenRatio.y / mediaRatio.y, 1.0)
+                );
+                vec2 uv = (vUv - 0.5) * ratio + 0.5;
+
                 if(uMirror > 0.5) { uv.x = 1.0 - uv.x; }
+
+                if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                    return;
+                }
 
                 float glitchOffset = 0.0;
                 if (uGlitchTearing > 0.0) {
@@ -198,10 +196,8 @@
                 
                 color = (color - 0.5) * uContrast + 0.5;
                 color *= uBrightness;
-                
                 float luma = getLuma(color);
                 vec3 lumaVec = vec3(luma);
-                
                 color = mix(lumaVec, color, uSaturation);
                 color = applyHue(color, uHue);
 
@@ -210,18 +206,15 @@
                 float s22 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(1.0, 1.0)).rgb);
                 float s02 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(-1.0, 1.0)).rgb);
                 float s20 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(1.0, -1.0)).rgb);
-                
                 float edge = abs(s00 - s22) + abs(s02 - s20);
                 float isEdge = smoothstep(uEdgeThreshold - 0.05, uEdgeThreshold, edge);
 
                 vec3 postColor = floor(color * uColorSteps) / uColorSteps;
-
                 vec2 aspectUv = baseUv;
                 aspectUv.x *= uResolution.x / uResolution.y; 
                 vec2 gridUv = aspectUv * uDotScale; 
                 vec2 cellCenter = fract(gridUv) - 0.5;
                 float dotDist = length(cellCenter);
-                
                 float radius = (1.0 - luma) * 0.7; 
                 float dotMask = smoothstep(radius, radius + 0.1, dotDist);
                 vec3 dotColor = vec3(0.05, 0.05, 0.1);
@@ -255,7 +248,7 @@
     };
 
     // ==========================================
-    // SGX MASTER INTERFACE (Audio + Video Muxing + Modular UI)
+    // MAIN APP (Lógica de Audio y Controles)
     // ==========================================
     function App() {
         const fileInputRef = useRef(null);
@@ -265,7 +258,8 @@
         const activeStreamRef = useRef(null);
         const audioStreamRef = useRef(null); 
         
-        const [mediaSource, setMediaSource] = useState(null);
+        const [texture, setTexture] = useState(null);
+        const [mediaRes, setMediaRes] = useState(new THREE.Vector2(1, 1));
         const [isCamera, setIsCamera] = useState(true);
         const [isMenuOpen, setIsMenuOpen] = useState(true);
         
@@ -275,111 +269,102 @@
         const [videoExtension, setVideoExtension] = useState('mp4');
         
         const [params, setParams] = useState({
-            inkThickness: 0.8,
-            colorSteps: 5.0,      
-            saturation: 1.5,      
-            hue: 0.0, 
-            dotScale: 120.0,      
-            dotIntensity: 0.4,
-            brightness: 1.0,
-            contrast: 1.2,
-            noise: 0.1,
-            aberration: 0.0,
-            glitchTearing: 0.0,
-            scanlines: 0.0
+            inkThickness: 0.8, colorSteps: 5.0, saturation: 1.5, hue: 0.0, 
+            dotScale: 120.0, dotIntensity: 0.4, brightness: 1.0, contrast: 1.2, 
+            noise: 0.1, aberration: 0.0, glitchTearing: 0.0, scanlines: 0.0
         });
 
         const presets = {
             comic: { inkThickness: 0.8, colorSteps: 5.0, saturation: 1.5, hue: 0.0, dotScale: 120.0, dotIntensity: 0.4, brightness: 1.0, contrast: 1.2, noise: 0.1, aberration: 0.0, glitchTearing: 0.0, scanlines: 0.0 },
             manga: { inkThickness: 0.9, colorSteps: 2.0, saturation: 0.0, hue: 0.0, dotScale: 150.0, dotIntensity: 0.8, brightness: 1.2, contrast: 1.5, noise: 0.2, aberration: 0.5, glitchTearing: 0.0, scanlines: 0.2 },
             cyberpunk: { inkThickness: 0.7, colorSteps: 8.0, saturation: 2.5, hue: 0.5, dotScale: 60.0, dotIntensity: 0.2, brightness: 0.9, contrast: 1.4, noise: 0.05, aberration: 2.0, glitchTearing: 0.8, scanlines: 1.0 },
-            acid: { inkThickness: 0.4, colorSteps: 3.0, saturation: 3.0, hue: 3.14, dotScale: 40.0, dotIntensity: 0.6, brightness: 1.2, contrast: 2.0, noise: 0.3, aberration: 3.5, glitchTearing: 1.5, scanlines: 0.0 },
-            raw: { inkThickness: 0.0, colorSteps: 15.0, saturation: 1.0, hue: 0.0, dotScale: 1.0, dotIntensity: 0.0, brightness: 1.0, contrast: 1.0, noise: 0.0, aberration: 0.0, glitchTearing: 0.0, scanlines: 0.0 }
+            acid: { inkThickness: 0.4, colorSteps: 3.0, saturation: 3.0, hue: 3.14, dotScale: 40.0, dotIntensity: 0.6, brightness: 1.2, contrast: 2.0, noise: 0.3, aberration: 3.5, glitchTearing: 1.5, scanlines: 0.0 }
         };
 
         const applyPreset = (key) => setParams(prev => ({ ...prev, ...presets[key] }));
         const updateParam = (key, value) => setParams(prev => ({ ...prev, [key]: Number(value) }));
 
-        const startCamera = async () => {
+        const killCurrentMedia = () => {
             if (activeStreamRef.current) {
                 activeStreamRef.current.getTracks().forEach(t => t.stop());
+                activeStreamRef.current = null;
+                audioStreamRef.current = null;
             }
+            if (hiddenVideoRef.current) {
+                hiddenVideoRef.current.pause();
+                hiddenVideoRef.current.src = "";
+                hiddenVideoRef.current.srcObject = null;
+            }
+        };
 
+        const startCamera = async () => {
+            killCurrentMedia();
             if (navigator.mediaDevices) {
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" },
                         audio: { echoCancellation: true, noiseSuppression: true } 
                     });
-                    
                     activeStreamRef.current = stream;
+                    if (stream.getAudioTracks().length > 0) audioStreamRef.current = new MediaStream([stream.getAudioTracks()[0]]);
                     
-                    if (stream.getAudioTracks().length > 0) {
-                        audioStreamRef.current = new MediaStream([stream.getAudioTracks()[0]]);
-                    }
-
                     if(hiddenVideoRef.current) {
+                        hiddenVideoRef.current.muted = true;
                         hiddenVideoRef.current.srcObject = stream;
                         hiddenVideoRef.current.onloadedmetadata = () => {
                             hiddenVideoRef.current.play();
-                            setMediaSource(hiddenVideoRef.current);
+                            const tex = new THREE.VideoTexture(hiddenVideoRef.current);
+                            tex.minFilter = THREE.LinearFilter;
+                            tex.magFilter = THREE.LinearFilter;
+                            setTexture(tex);
+                            setMediaRes(new THREE.Vector2(hiddenVideoRef.current.videoWidth, hiddenVideoRef.current.videoHeight));
                             setIsCamera(true);
                         };
                     }
-                } catch (e) { console.error("Camera SGX Error:", e); }
+                } catch (e) { console.error("Camera Error:", e); }
             }
         };
 
         useEffect(() => { startCamera(); }, []);
 
-        // Eliminado crossOrigin="anonymous" del HTML para evitar Canvas Tainting
         const handleFileUpload = (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const url = URL.createObjectURL(file);
-            
-            if (activeStreamRef.current) {
-                activeStreamRef.current.getTracks().forEach(t => t.stop());
-                activeStreamRef.current = null;
-                audioStreamRef.current = null; 
-            }
+            killCurrentMedia();
 
-            if (file.type.startsWith('video/')) {
+            if (file.type.startsWith('image/')) {
+                new THREE.TextureLoader().load(url, (tex) => {
+                    tex.minFilter = THREE.LinearFilter;
+                    tex.magFilter = THREE.LinearFilter;
+                    setTexture(tex);
+                    setMediaRes(new THREE.Vector2(tex.image.width, tex.image.height));
+                    setIsCamera(false);
+                });
+            } else if (file.type.startsWith('video/')) {
                 if(hiddenVideoRef.current) {
-                    hiddenVideoRef.current.srcObject = null;
                     hiddenVideoRef.current.src = url;
                     hiddenVideoRef.current.loop = true;
-                    hiddenVideoRef.current.muted = true; 
-                    hiddenVideoRef.current.onloadedmetadata = () => {
-                        hiddenVideoRef.current.play();
-                        setMediaSource(hiddenVideoRef.current);
+                    hiddenVideoRef.current.muted = false; 
+                    hiddenVideoRef.current.play().then(() => {
+                        const tex = new THREE.VideoTexture(hiddenVideoRef.current);
+                        tex.minFilter = THREE.LinearFilter;
+                        tex.magFilter = THREE.LinearFilter;
+                        setTexture(tex);
+                        setMediaRes(new THREE.Vector2(hiddenVideoRef.current.videoWidth, hiddenVideoRef.current.videoHeight));
                         setIsCamera(false);
-                    };
-                }
-            } else if (file.type.startsWith('image/')) {
-                if(hiddenImageRef.current) {
-                    hiddenImageRef.current.onload = () => {
-                        setMediaSource(hiddenImageRef.current);
-                        setIsCamera(false);
-                    };
-                    hiddenImageRef.current.src = url;
+                    }).catch(err => console.error("Video play error:", err));
                 }
             }
         };
 
         const takeSnapshot = () => {
-            try {
-                const canvas = document.querySelector('canvas');
-                if(!canvas) return;
-                const dataUrl = canvas.toDataURL('image/png');
-                const link = document.createElement('a');
-                link.download = `SGX_VisGen_${Date.now()}.png`;
-                link.href = dataUrl;
-                link.click();
-            } catch (err) {
-                console.error("CORS Error on Export:", err);
-                alert("Error de seguridad: El navegador bloqueó la extracción. Intenta recargar la página.");
-            }
+            const canvas = document.querySelector('canvas');
+            if(!canvas) return;
+            const link = document.createElement('a');
+            link.download = `SGX_VisGen_${Date.now()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
         };
 
         const toggleRecording = () => {
@@ -387,65 +372,48 @@
             if(!canvas) return;
 
             if (!isRecording) {
-                try {
-                    recordedChunks.current = [];
-                    const canvasStream = canvas.captureStream(30); 
-                    
-                    let combinedStream = canvasStream;
-                    let finalAudioStream = null;
+                recordedChunks.current = [];
+                const canvasStream = canvas.captureStream(30); 
+                let combinedStream = canvasStream;
 
-                    if (isCamera && audioStreamRef.current) {
-                        finalAudioStream = audioStreamRef.current;
-                    } else if (!isCamera && hiddenVideoRef.current) {
-                        try {
-                            const vidStream = hiddenVideoRef.current.captureStream ? hiddenVideoRef.current.captureStream() : hiddenVideoRef.current.mozCaptureStream();
-                            if (vidStream && vidStream.getAudioTracks().length > 0) {
-                                finalAudioStream = new MediaStream([vidStream.getAudioTracks()[0]]);
-                            }
-                        } catch(e) { console.warn("No audio track in uploaded video", e); }
-                    }
-
-                    if (finalAudioStream && finalAudioStream.getAudioTracks().length > 0) {
-                        combinedStream = new MediaStream([
-                            ...canvasStream.getVideoTracks(),
-                            ...finalAudioStream.getAudioTracks()
-                        ]);
-                    }
-
-                    let mimeType = 'video/mp4'; 
-                    let fileExt = 'mp4';
-                    
-                    if (!MediaRecorder.isTypeSupported(mimeType)) {
-                        mimeType = 'video/webm; codecs=vp9,opus'; 
-                        fileExt = 'mp4'; 
-                        if (!MediaRecorder.isTypeSupported(mimeType)) {
-                            mimeType = 'video/webm'; 
+                let finalAudioStream = null;
+                if (isCamera && audioStreamRef.current) {
+                    finalAudioStream = audioStreamRef.current;
+                } else if (!isCamera && hiddenVideoRef.current) {
+                    try {
+                        const vidStream = hiddenVideoRef.current.captureStream ? hiddenVideoRef.current.captureStream() : hiddenVideoRef.current.mozCaptureStream();
+                        if (vidStream && vidStream.getAudioTracks().length > 0) {
+                            finalAudioStream = new MediaStream([vidStream.getAudioTracks()[0]]);
                         }
-                    }
-                    setVideoExtension(fileExt);
-
-                    mediaRecorderRef.current = new MediaRecorder(combinedStream, { mimeType: mimeType });
-                    
-                    mediaRecorderRef.current.ondataavailable = (event) => {
-                        if (event.data.size > 0) recordedChunks.current.push(event.data);
-                    };
-                    
-                    mediaRecorderRef.current.onstop = () => {
-                        const blob = new Blob(recordedChunks.current, { type: mimeType });
-                        const url = URL.createObjectURL(blob);
-                        const link = document.createElement('a');
-                        link.download = `SGX_VisGen_${Date.now()}.${fileExt}`;
-                        link.href = url;
-                        link.click();
-                        setTimeout(() => window.URL.revokeObjectURL(url), 100);
-                    };
-                    
-                    mediaRecorderRef.current.start();
-                    setIsRecording(true);
-                } catch (err) {
-                    console.error("Recording error:", err);
-                    alert("El navegador bloqueó la grabación por políticas de seguridad del archivo subido.");
+                    } catch(e) { console.warn("Audio extraction failed", e); }
                 }
+
+                if (finalAudioStream && finalAudioStream.getAudioTracks().length > 0) {
+                    combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...finalAudioStream.getAudioTracks()]);
+                }
+
+                let mimeType = 'video/mp4'; 
+                let fileExt = 'mp4';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'video/webm; codecs=vp9,opus'; 
+                    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm'; 
+                }
+                setVideoExtension(fileExt);
+
+                mediaRecorderRef.current = new MediaRecorder(combinedStream, { mimeType });
+                mediaRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.current.push(e.data); };
+                mediaRecorderRef.current.onstop = () => {
+                    const blob = new Blob(recordedChunks.current, { type: mimeType });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.download = `SGX_VisGen_${Date.now()}.${fileExt}`;
+                    link.href = url;
+                    link.click();
+                    setTimeout(() => window.URL.revokeObjectURL(url), 100);
+                };
+                
+                mediaRecorderRef.current.start();
+                setIsRecording(true);
             } else {
                 mediaRecorderRef.current.stop();
                 setIsRecording(false);
@@ -454,41 +422,37 @@
 
         return (
             <div className="relative w-full h-screen bg-[#050505] overflow-hidden font-sans">
-                {/* Eliminado crossOrigin para evitar Tainting de Canvas */}
-                <video ref={hiddenVideoRef} className="hidden" playsInline muted />
-                <img ref={hiddenImageRef} className="hidden" />
+                <video ref={hiddenVideoRef} className="hidden" playsInline />
                 <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={handleFileUpload} />
                 
-                <div className="absolute inset-0 z-0">
+                <div className="absolute inset-0 z-0 pointer-events-none">
                     <Canvas gl={{ preserveDrawingBuffer: true, antialias: false, toneMapping: THREE.NoToneMapping }}>
-                        <ComicBackground mediaSource={mediaSource} isCamera={isCamera} shaderParams={params} />
+                        <ComicBackground texture={texture} mediaRes={mediaRes} isCamera={isCamera} shaderParams={params} />
                     </Canvas>
                 </div>
 
                 {/* HEADER UI */}
-                <div className="absolute top-6 left-6 z-20 flex flex-col md:flex-row items-start md:items-center gap-4 pointer-events-none">
-                    <div className="flex items-center gap-3 bg-white p-3 border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_#32527B] transform -rotate-1 pointer-events-auto">
+                <div className="absolute top-6 left-6 z-20 pointer-events-auto">
+                    <div className="flex items-center gap-3 bg-white p-3 border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_#32527B] transform -rotate-1">
                         <Layers className="text-black w-5 h-5" />
-                        <div>
-                            <h1 className="text-xl text-black comic-font leading-none uppercase">SGX <span className="text-[#B87333]">VisGen</span></h1>
-                        </div>
+                        <div><h1 className="text-xl text-black comic-font leading-none uppercase">SGX <span className="text-[#B87333]">VisGen</span></h1></div>
                     </div>
                 </div>
 
-                {/* ACCIONES SUPERIORES DERECHAS */}
-                <div className="absolute top-6 right-6 z-20 flex gap-3">
-                    <button onClick={() => fileInputRef.current?.click()} className="bg-black/80 backdrop-blur border border-sgxBlue text-white p-3 rounded-full hover:bg-sgxBlue transition shadow-[0_0_15px_rgba(50,82,123,0.5)]">
+                {/* UPLOAD / CAM TOGGLE */}
+                <div className="absolute top-6 right-6 z-20 flex gap-3 pointer-events-auto">
+                    <button onClick={() => fileInputRef.current?.click()} className="bg-black/80 backdrop-blur border border-sgxBlue text-white p-3 rounded-full hover:bg-sgxBlue transition shadow-[0_0_15px_rgba(50,82,123,0.5)] outline-none">
                         <Upload className="w-5 h-5" />
                     </button>
                     { !isCamera && (
-                        <button onClick={startCamera} className="bg-black/80 backdrop-blur border border-sgxYellow text-white p-3 rounded-full hover:bg-sgxYellow hover:text-black transition shadow-[0_0_15px_rgba(253,204,13,0.5)]">
+                        <button onClick={startCamera} className="bg-black/80 backdrop-blur border border-sgxYellow text-white p-3 rounded-full hover:bg-sgxYellow hover:text-black transition shadow-[0_0_15px_rgba(253,204,13,0.5)] outline-none">
                             <Camera className="w-5 h-5" />
                         </button>
                     )}
                 </div>
 
-                {/* CAPTURA BOTTOM CENTER (PRO ICONS) */}
-                <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-30 flex items-center gap-4">
+                {/* CAPTURA (FOTO/VIDEO) */}
+                <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-30 flex items-center gap-4 pointer-events-auto">
                     <button onClick={takeSnapshot} className="bg-white text-black p-4 rounded-full hover:scale-105 transition shadow-[0_0_15px_rgba(255,255,255,0.4)] outline-none">
                         <ImageIcon className="w-6 h-6" />
                     </button>
@@ -497,11 +461,11 @@
                     </button>
                 </div>
 
-                {/* PANEL DE CONTROL RESTAURADO A MODULAR (V4/V6) */}
-                <div className="absolute bottom-24 left-6 md:top-24 md:left-6 md:bottom-auto w-[calc(100%-3rem)] md:w-80 z-20 flex flex-col gap-2">
+                {/* CONSOLE PANEL (RESTAURADO MODULAR v6) */}
+                <div className="absolute bottom-24 left-6 md:top-24 md:left-6 md:bottom-auto w-[calc(100%-3rem)] md:w-80 z-20 flex flex-col gap-2 pointer-events-auto">
                     <button 
                         onClick={() => setIsMenuOpen(!isMenuOpen)}
-                        className="flex items-center justify-between bg-sgxYellow text-black border-2 border-black rounded-xl px-4 py-2 font-black uppercase text-sm tracking-widest shadow-[4px_4px_0px_0px_#B87333] hover:translate-y-1 hover:shadow-[0px_0px_0px_0px_#B87333] transition-all outline-none"
+                        className="flex items-center justify-between bg-sgxYellow text-black border-2 border-black rounded-xl px-4 py-2 font-black uppercase text-sm tracking-widest shadow-[4px_4px_0px_0px_#B87333] hover:translate-y-1 transition-all outline-none"
                     >
                         <span className="flex items-center gap-2"><Settings2 className="w-4 h-4"/> Console</span>
                         <span>{isMenuOpen ? '−' : '+'}</span>
@@ -546,6 +510,10 @@
                                         <div>
                                             <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Brillo</div>
                                             <input type="range" min="0.1" max="2.5" step="0.1" value={params.brightness} onChange={(e) => updateParam('brightness', e.target.value)} />
+                                        </div>
+                                        <div>
+                                            <div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Contraste</div>
+                                            <input type="range" min="0.1" max="3.0" step="0.1" value={params.contrast} onChange={(e) => updateParam('contrast', e.target.value)} />
                                         </div>
                                     </div>
                                 </div>
