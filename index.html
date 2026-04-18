@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>SGX Story VisGen | Production Core v9 (Audio/Image Fix)</title>
+  <title>SGX Story VisGen | Master Core (Stabilized)</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -28,6 +28,7 @@
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #050505; color: white; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     #root { width: 100%; height: 100%; }
     
+    /* Sliders tácticos */
     input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; position: relative; z-index: 50; }
     input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #FDCC0D; cursor: pointer; margin-top: -4px; box-shadow: 0 0 6px rgba(253,204,13,0.8); }
     input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #32527B; border-radius: 2px; }
@@ -64,16 +65,17 @@
     import { Settings2, Camera, PaintBucket, Grid, Scissors, Layers, Upload, Video, Square, Zap, Scan, MonitorPlay, Palette, Image as ImageIcon } from 'lucide-react';
 
     // ==========================================
-    // SHADER ENGINE 
+    // SHADER ENGINE (Desvinculado del Estado de React)
     // ==========================================
-    const ComicBackground = ({ texture, mediaRes, isCamera, shaderParams }) => {
+    const ComicBackground = ({ mediaSource, isCamera, shaderParams }) => {
         const { size } = useThree();
         const materialRef = useRef();
+        const textureRef = useRef(null);
 
         const uniforms = useMemo(() => ({
             tDiffuse: { value: null },
             uResolution: { value: new THREE.Vector2(1, 1) },
-            uMediaResolution: { value: new THREE.Vector2(1, 1) }, 
+            uMediaResolution: { value: new THREE.Vector2(1, 1) },
             uMirror: { value: isCamera ? 1.0 : 0.0 },
             uTime: { value: 0.0 },
             uEdgeThreshold: { value: 0.15 },
@@ -90,17 +92,49 @@
             uScanlines: { value: 0.0 }
         }), [isCamera]);
 
+        // GESTIÓN NATIVA DE TEXTURAS EN THREE.JS
         useEffect(() => {
-            if (texture) uniforms.tDiffuse.value = texture;
-            uniforms.uMirror.value = isCamera ? 1.0 : 0.0;
-            if (mediaRes) uniforms.uMediaResolution.value.set(mediaRes.x, mediaRes.y);
-        }, [texture, mediaRes, uniforms, isCamera]);
+            if (!mediaSource) return;
+
+            if (textureRef.current) {
+                textureRef.current.dispose();
+            }
+
+            let tex;
+            let width = 1, height = 1;
+
+            if (mediaSource.tagName.toUpperCase() === 'VIDEO') {
+                tex = new THREE.VideoTexture(mediaSource);
+                width = mediaSource.videoWidth || 1920;
+                height = mediaSource.videoHeight || 1080;
+            } else if (mediaSource.tagName.toUpperCase() === 'IMG') {
+                tex = new THREE.Texture(mediaSource);
+                tex.needsUpdate = true;
+                width = mediaSource.naturalWidth || 1920;
+                height = mediaSource.naturalHeight || 1080;
+            }
+
+            if (tex) {
+                tex.minFilter = THREE.LinearFilter;
+                tex.magFilter = THREE.LinearFilter;
+                textureRef.current = tex;
+                uniforms.tDiffuse.value = tex;
+                uniforms.uMediaResolution.value.set(width, height);
+            }
+        }, [mediaSource, uniforms]);
 
         useFrame(({ clock }) => {
             if (materialRef.current) {
                 const u = materialRef.current.uniforms;
                 u.uTime.value = clock.getElapsedTime();
                 u.uResolution.value.set(size.width, size.height);
+                u.uMirror.value = isCamera ? 1.0 : 0.0;
+                
+                // Actualización dinámica de resolución si el video carga tarde
+                if (mediaSource && mediaSource.tagName === 'VIDEO' && mediaSource.videoWidth > 0) {
+                    u.uMediaResolution.value.set(mediaSource.videoWidth, mediaSource.videoHeight);
+                }
+
                 u.uEdgeThreshold.value = 0.4 - (shaderParams.inkThickness * 0.35); 
                 u.uColorSteps.value = shaderParams.colorSteps;
                 u.uSaturation.value = shaderParams.saturation;
@@ -156,6 +190,7 @@
             }
 
             void main() {
+                // OBJECT-FIT COVER MATEMÁTICO
                 vec2 screenRatio = vec2(uResolution.x / uResolution.y, 1.0);
                 vec2 mediaRatio = vec2(uMediaResolution.x / uMediaResolution.y, 1.0);
                 if (uResolution.x / uResolution.y < 1.0) {
@@ -175,6 +210,7 @@
                     return;
                 }
 
+                // GLITCH TEARING
                 float glitchOffset = 0.0;
                 if (uGlitchTearing > 0.0) {
                     float gTime = uTime * 15.0;
@@ -183,6 +219,7 @@
                 }
                 vec2 baseUv = uv + vec2(glitchOffset, 0.0);
 
+                // ABERRACIÓN RGB
                 vec2 rUv = baseUv + vec2(uAberration * 0.01, 0.0);
                 vec2 gUv = baseUv;
                 vec2 bUv = baseUv - vec2(uAberration * 0.01, 0.0);
@@ -192,6 +229,7 @@
                 color.g = texture2D(tDiffuse, gUv).g;
                 color.b = texture2D(tDiffuse, bUv).b;
                 
+                // COLOR GRADING
                 color = (color - 0.5) * uContrast + 0.5;
                 color *= uBrightness;
                 float luma = getLuma(color);
@@ -199,6 +237,7 @@
                 color = mix(lumaVec, color, uSaturation);
                 color = applyHue(color, uHue);
 
+                // DETECCIÓN DE TINTA
                 vec2 texel = 1.0 / uResolution;
                 float s00 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(-1.0, -1.0)).rgb);
                 float s22 = getLuma(texture2D(tDiffuse, baseUv + texel * vec2(1.0, 1.0)).rgb);
@@ -207,6 +246,7 @@
                 float edge = abs(s00 - s22) + abs(s02 - s20);
                 float isEdge = smoothstep(uEdgeThreshold - 0.05, uEdgeThreshold, edge);
 
+                // POSTERIZACIÓN Y TRAMA
                 vec3 postColor = floor(color * uColorSteps) / uColorSteps;
                 vec2 aspectUv = baseUv;
                 aspectUv.x *= uResolution.x / uResolution.y; 
@@ -217,6 +257,7 @@
                 float dotMask = smoothstep(radius, radius + 0.1, dotDist);
                 vec3 dotColor = vec3(0.05, 0.05, 0.1);
 
+                // VFX RUIDO Y CRT
                 float n = (rand(baseUv + uTime) - 0.5) * uNoise;
                 float scanline = sin(uv.y * uResolution.y * 1.5) * 0.04 * uScanlines;
 
@@ -227,8 +268,6 @@
                 gl_FragColor = vec4(finalColor, 1.0);
             }
         `;
-
-        if (!texture) return null;
 
         return (
             <mesh renderOrder={-1} frustumCulled={false}>
@@ -246,23 +285,20 @@
     };
 
     // ==========================================
-    // MAIN APP
+    // MAIN APP & AUDIO ROUTING
     // ==========================================
     function App() {
         const fileInputRef = useRef(null);
         const hiddenVideoRef = useRef(null);
-        const hiddenImageRef = useRef(null); // RESTAURADO
         
         const activeStreamRef = useRef(null);
-        const audioStreamRef = useRef(null); // Micrófono
+        const audioStreamRef = useRef(null); // Micrófono directo
         
-        // WEB AUDIO API NODES (Para Extraer Audio del Video Subido)
         const audioCtxRef = useRef(null);
         const sourceNodeRef = useRef(null);
         const destNodeRef = useRef(null);
         
-        const [texture, setTexture] = useState(null);
-        const [mediaRes, setMediaRes] = useState(new THREE.Vector2(1, 1));
+        const [mediaSource, setMediaSource] = useState(null);
         const [isCamera, setIsCamera] = useState(true);
         const [isMenuOpen, setIsMenuOpen] = useState(true);
         
@@ -281,7 +317,8 @@
             comic: { inkThickness: 0.8, colorSteps: 5.0, saturation: 1.5, hue: 0.0, dotScale: 120.0, dotIntensity: 0.4, brightness: 1.0, contrast: 1.2, noise: 0.1, aberration: 0.0, glitchTearing: 0.0, scanlines: 0.0 },
             manga: { inkThickness: 0.9, colorSteps: 2.0, saturation: 0.0, hue: 0.0, dotScale: 150.0, dotIntensity: 0.8, brightness: 1.2, contrast: 1.5, noise: 0.2, aberration: 0.5, glitchTearing: 0.0, scanlines: 0.2 },
             cyberpunk: { inkThickness: 0.7, colorSteps: 8.0, saturation: 2.5, hue: 0.5, dotScale: 60.0, dotIntensity: 0.2, brightness: 0.9, contrast: 1.4, noise: 0.05, aberration: 2.0, glitchTearing: 0.8, scanlines: 1.0 },
-            acid: { inkThickness: 0.4, colorSteps: 3.0, saturation: 3.0, hue: 3.14, dotScale: 40.0, dotIntensity: 0.6, brightness: 1.2, contrast: 2.0, noise: 0.3, aberration: 3.5, glitchTearing: 1.5, scanlines: 0.0 }
+            acid: { inkThickness: 0.4, colorSteps: 3.0, saturation: 3.0, hue: 3.14, dotScale: 40.0, dotIntensity: 0.6, brightness: 1.2, contrast: 2.0, noise: 0.3, aberration: 3.5, glitchTearing: 1.5, scanlines: 0.0 },
+            raw: { inkThickness: 0.0, colorSteps: 15.0, saturation: 1.0, hue: 0.0, dotScale: 1.0, dotIntensity: 0.0, brightness: 1.0, contrast: 1.0, noise: 0.0, aberration: 0.0, glitchTearing: 0.0, scanlines: 0.0 }
         };
 
         const applyPreset = (key) => setParams(prev => ({ ...prev, ...presets[key] }));
@@ -295,8 +332,12 @@
             }
             if (hiddenVideoRef.current) {
                 hiddenVideoRef.current.pause();
-                hiddenVideoRef.current.src = "";
-                hiddenVideoRef.current.srcObject = null;
+                hiddenVideoRef.current.removeAttribute('src');
+                hiddenVideoRef.current.load();
+            }
+            if (sourceNodeRef.current) {
+                sourceNodeRef.current.disconnect();
+                sourceNodeRef.current = null;
             }
         };
 
@@ -316,11 +357,7 @@
                         hiddenVideoRef.current.srcObject = stream;
                         hiddenVideoRef.current.onloadedmetadata = () => {
                             hiddenVideoRef.current.play();
-                            const tex = new THREE.VideoTexture(hiddenVideoRef.current);
-                            tex.minFilter = THREE.LinearFilter;
-                            tex.magFilter = THREE.LinearFilter;
-                            setTexture(tex);
-                            setMediaRes(new THREE.Vector2(hiddenVideoRef.current.videoWidth, hiddenVideoRef.current.videoHeight));
+                            setMediaSource(hiddenVideoRef.current);
                             setIsCamera(true);
                         };
                     }
@@ -330,53 +367,50 @@
 
         useEffect(() => { startCamera(); }, []);
 
+        // UPLOAD ENGINE (Separado React State y WebGL Texture)
         const handleFileUpload = (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const url = URL.createObjectURL(file);
             killCurrentMedia();
 
-            // UPLOAD DE IMAGEN (RESTAURADO)
             if (file.type.startsWith('image/')) {
-                new THREE.TextureLoader().load(url, (tex) => {
-                    tex.minFilter = THREE.LinearFilter;
-                    tex.magFilter = THREE.LinearFilter;
-                    setTexture(tex);
-                    setMediaRes(new THREE.Vector2(tex.image.width, tex.image.height));
+                const img = new Image();
+                img.onload = () => {
+                    setMediaSource(img);
                     setIsCamera(false);
-                });
+                };
+                img.src = url;
             } 
-            // UPLOAD DE VIDEO CON WEB AUDIO API
             else if (file.type.startsWith('video/')) {
                 if(hiddenVideoRef.current) {
                     hiddenVideoRef.current.src = url;
                     hiddenVideoRef.current.loop = true;
-                    hiddenVideoRef.current.muted = false; // Asegura que no esté muteado
+                    // CRÍTICO: Debe estar muteado para que el navegador permita autoplay sin que el usuario haga clic en play
+                    hiddenVideoRef.current.muted = true; 
                     
-                    // Configurar Enrutamiento de Audio
+                    // Ruteo de Audio por Web Audio API (Bypass de mute)
                     try {
                         if (!audioCtxRef.current) {
                             const AudioContext = window.AudioContext || window.webkitAudioContext;
                             audioCtxRef.current = new AudioContext();
                             destNodeRef.current = audioCtxRef.current.createMediaStreamDestination();
                         }
-                        if (!sourceNodeRef.current) {
-                            sourceNodeRef.current = audioCtxRef.current.createMediaElementSource(hiddenVideoRef.current);
-                            sourceNodeRef.current.connect(audioCtxRef.current.destination); // Salida a las bocinas
-                            sourceNodeRef.current.connect(destNodeRef.current); // Salida a la grabación
-                        }
-                    } catch(err) { console.warn("Web Audio Init Error:", err); }
+                        if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+                        
+                        sourceNodeRef.current = audioCtxRef.current.createMediaElementSource(hiddenVideoRef.current);
+                        sourceNodeRef.current.connect(audioCtxRef.current.destination); // Suena en las bocinas
+                        sourceNodeRef.current.connect(destNodeRef.current); // Va a la grabadora
+                    } catch(err) { console.warn("Audio Routing Warning:", err); }
 
                     hiddenVideoRef.current.play().then(() => {
-                        const tex = new THREE.VideoTexture(hiddenVideoRef.current);
-                        tex.minFilter = THREE.LinearFilter;
-                        tex.magFilter = THREE.LinearFilter;
-                        setTexture(tex);
-                        setMediaRes(new THREE.Vector2(hiddenVideoRef.current.videoWidth, hiddenVideoRef.current.videoHeight));
+                        setMediaSource(hiddenVideoRef.current);
                         setIsCamera(false);
-                    }).catch(err => console.error("Video play error:", err));
+                    }).catch(err => console.error("Autoplay bloqueado:", err));
                 }
             }
+            // Reset input
+            e.target.value = null;
         };
 
         const takeSnapshot = () => {
@@ -397,17 +431,11 @@
                 const canvasStream = canvas.captureStream(30); 
                 let combinedStream = canvasStream;
 
-                // Asegurar que el contexto de audio esté corriendo (Safari fix)
-                if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-                    audioCtxRef.current.resume();
-                }
-
-                // FUSION DE AUDIO
                 let finalAudioStream = null;
                 if (isCamera && audioStreamRef.current) {
-                    finalAudioStream = audioStreamRef.current; // Micrófono directo
+                    finalAudioStream = audioStreamRef.current;
                 } else if (!isCamera && destNodeRef.current) {
-                    finalAudioStream = destNodeRef.current.stream; // Audio enrutado del video
+                    finalAudioStream = destNodeRef.current.stream;
                 }
 
                 if (finalAudioStream && finalAudioStream.getAudioTracks().length > 0) {
@@ -444,13 +472,13 @@
 
         return (
             <div className="relative w-full h-screen bg-[#050505] overflow-hidden font-sans">
-                <video ref={hiddenVideoRef} className="hidden" playsInline />
-                <img ref={hiddenImageRef} className="hidden" alt="Upload Buffer" /> 
+                {/* Elementos Base Ocultos */}
+                <video ref={hiddenVideoRef} className="hidden" playsInline crossOrigin="anonymous" />
                 <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={handleFileUpload} />
                 
                 <div className="absolute inset-0 z-0 pointer-events-none">
                     <Canvas gl={{ preserveDrawingBuffer: true, antialias: false, toneMapping: THREE.NoToneMapping }}>
-                        <ComicBackground texture={texture} mediaRes={mediaRes} isCamera={isCamera} shaderParams={params} />
+                        <ComicBackground mediaSource={mediaSource} isCamera={isCamera} shaderParams={params} />
                     </Canvas>
                 </div>
 
@@ -484,7 +512,7 @@
                     </button>
                 </div>
 
-                {/* CONSOLE PANEL */}
+                {/* CONSOLE PANEL MODULAR DE ALTA DENSIDAD */}
                 <div className="absolute bottom-24 left-6 md:top-24 md:left-6 md:bottom-auto w-[calc(100%-3rem)] md:w-80 z-20 flex flex-col gap-2 pointer-events-auto">
                     <button 
                         onClick={() => setIsMenuOpen(!isMenuOpen)}
@@ -519,6 +547,7 @@
                                         <div><div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Grosor Tinta</div><input type="range" min="0" max="1" step="0.05" value={params.inkThickness} onChange={(e) => updateParam('inkThickness', e.target.value)} /></div>
                                         <div><div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Fases Poster</div><input type="range" min="2" max="20" step="1" value={params.colorSteps} onChange={(e) => updateParam('colorSteps', e.target.value)} /></div>
                                         <div><div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Brillo</div><input type="range" min="0.1" max="2.5" step="0.1" value={params.brightness} onChange={(e) => updateParam('brightness', e.target.value)} /></div>
+                                        <div><div className="text-gray-300 text-[9px] font-bold uppercase mb-1">Contraste</div><input type="range" min="0.1" max="3.0" step="0.1" value={params.contrast} onChange={(e) => updateParam('contrast', e.target.value)} /></div>
                                     </div>
                                 </div>
 
